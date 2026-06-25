@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/hibiken/asynq"
@@ -33,10 +34,17 @@ func main() {
 
 	// --- HTTP router -------------------------------------------------------------
 	app := fiber.New(fiber.Config{
-		ReadTimeout:  5 * 1000, // 5 s
-		WriteTimeout: 10 * 1000, // 10 s
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		// BodyLimit caps Fiber's own body parser at the same ceiling enforced by
+		// the RequestSizeLimit middleware, providing defence-in-depth.
+		BodyLimit: api.MaxRequestBodyBytes,
 	})
 
+	// Enforce a hard 25 MB ceiling on every route before any handler runs.
+	app.Use(api.RequestSizeLimit())
+
+	// --- Routes ------------------------------------------------------------------
 	app.Post("/v1/send", api.SendEmailHandler(sqlDB, redisClient))
 
 	// --- Graceful shutdown -------------------------------------------------------

@@ -56,28 +56,16 @@ func (h *Handler) HandleEmailDeliver(ctx context.Context, t *asynq.Task) error {
 	}
 	decryptedSecret := string(plaintext)
 
-	// 5. Load attachments from disk.
+	// 5. Collect attachment metadata from the database.
 	attachRows, err := queryAttachments(ctx, h.DB, p.LogID)
 	if err != nil {
 		return fmt.Errorf("query attachments: %w", err)
 	}
 
-	attachments := make([]routes.Attachment, 0, len(attachRows))
-	// Track every file path we read so we can prune them in the defer below,
-	// regardless of whether Send succeeds or fails.
-	var diskPaths []string
-
+	// diskPaths is the canonical list of files to prune after delivery,
+	// regardless of whether the send succeeds or fails.
+	diskPaths := make([]string, 0, len(attachRows))
 	for _, ar := range attachRows {
-		data, err := storage.ReadFile(ar.LocalPath)
-		if err != nil {
-			// If we can't read a file off disk, fail early — no point sending
-			// an email with missing attachments.
-			return fmt.Errorf("read attachment %s: %w", ar.LocalPath, err)
-		}
-		attachments = append(attachments, routes.Attachment{
-			FileName: ar.FileName,
-			Content:  data,
-		})
 		diskPaths = append(diskPaths, ar.LocalPath)
 	}
 
@@ -90,21 +78,62 @@ func (h *Handler) HandleEmailDeliver(ctx context.Context, t *asynq.Task) error {
 		}
 	}()
 
-	// 7. Build the correct EmailProvider.
+	// 7. Dispatch to the correct provider.
 	//
-	// In production the route_type drives the switch; in integration tests
-	// TestProvider is set externally to intercept the call.
-	provider := h.TestProvider
-	if provider == nil {
+	// Production SMTP path — use the memory-bounded streaming sender:
+	//   - Attachment bytes are never loaded into RAM; the file FDs are opened
+	//     inside SendStream and piped directly into the socket via io.CopyBuffer.
+	//
+	// Test / non-SMTP path — fall back to the original []Attachment interface
+	//   so that MockEmailProvider and ResendProvider continue to work unchanged.
+	if h.TestProvider == nil && route.RouteType == "SMTP" {
+		diskAttachments := make([]routes.DiskAttachment, 0, len(attachRows))
+		for _, ar := range attachRows {
+			diskAttachments = append(diskAttachments, routes.DiskAttachment{
+				FileName:  ar.FileName,
+				LocalPath: ar.LocalPath,
+			})
+		}
+
+		provider := routes.NewSMTPProvider(
+			route.SMTPHost,
+			route.SMTPPort,
+			route.SMTPUsername,
+			decryptedSecret,
+			route.FromEmail,
+		)
+
+		if err := provider.SendStream(logEntry.Recipient, logEntry.Subject, logEntry.BodyHTML, diskAttachments); err != nil {
+			if updateErr := updateLogStatus(ctx, h.DB, p.LogID, "failed", err.Error()); updateErr != nil {
+				log.Printf("WARN: failed to update log %s to 'failed': %v", p.LogID, updateErr)
+			}
+			return fmt.Errorf("provider.SendStream: %w", err)
+		}
+
+		if err := updateLogStatus(ctx, h.DB, p.LogID, "sent", ""); err != nil {
+			return fmt.Errorf("update log sent: %w", err)
+		}
+		return nil
+	}
+
+	// 8. Non-SMTP / test path: load attachment bytes into memory for the provider.
+	attachments := make([]routes.Attachment, 0, len(attachRows))
+	for _, ar := range attachRows {
+		data, err := storage.ReadFile(ar.LocalPath)
+		if err != nil {
+			return fmt.Errorf("read attachment %s: %w", ar.LocalPath, err)
+		}
+		attachments = append(attachments, routes.Attachment{
+			FileName: ar.FileName,
+			Content:  data,
+		})
+	}
+
+	var provider routes.EmailProvider
+	if h.TestProvider != nil {
+		provider = h.TestProvider
+	} else {
 		switch route.RouteType {
-		case "SMTP":
-			provider = routes.NewSMTPProvider(
-				route.SMTPHost,
-				route.SMTPPort,
-				route.SMTPUsername,
-				decryptedSecret,
-				route.FromEmail,
-			)
 		case "API":
 			provider = routes.NewResendProvider(decryptedSecret, route.FromEmail)
 		default:
@@ -112,7 +141,7 @@ func (h *Handler) HandleEmailDeliver(ctx context.Context, t *asynq.Task) error {
 		}
 	}
 
-	// 8. Send — the defer above will clean up disk regardless of outcome.
+	// 9. Send — the defer above will clean up disk regardless of outcome.
 	if err := provider.Send(logEntry.Recipient, logEntry.Subject, logEntry.BodyHTML, attachments); err != nil {
 		if updateErr := updateLogStatus(ctx, h.DB, p.LogID, "failed", err.Error()); updateErr != nil {
 			log.Printf("WARN: failed to update log %s to 'failed': %v", p.LogID, updateErr)
@@ -120,7 +149,7 @@ func (h *Handler) HandleEmailDeliver(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("provider.Send: %w", err)
 	}
 
-	// 9. Mark sent.
+	// 10. Mark sent.
 	if err := updateLogStatus(ctx, h.DB, p.LogID, "sent", ""); err != nil {
 		return fmt.Errorf("update log sent: %w", err)
 	}
