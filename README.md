@@ -20,15 +20,15 @@ Vessel consists of two primary services sharing a PostgreSQL database and a Redi
 
 ```mermaid
 flowchart TD
-    Client[Client App] -->|1. POST /v1/send| API[API Server (Fiber)]
-    API -->|2. Insert 'queued' log| DB[(PostgreSQL)]
-    API -->|3. Enqueue delivery task| Broker[(Redis/Asynq)]
+    Client["Client App"] -->|1. POST /v1/send| API["API Server (Fiber)"]
+    API -->|2. Insert 'queued' log| DB[("PostgreSQL")]
+    API -->|3. Enqueue delivery task| Broker[("Redis/Asynq")]
     API -->|4. Return 202 Accepted| Client
     
-    Worker[Worker Service] -->|5. Dequeue task| Broker
+    Worker["Worker Service"] -->|5. Dequeue task| Broker
     Worker -->|6. Fetch log & route| DB
-    Worker -->|7. Decrypt credentials| Crypto[AES-256-GCM]
-    Worker -->|8. Send email| MailProvider[SMTP / Resend API]
+    Worker -->|7. Decrypt credentials| Crypto["AES-256-GCM"]
+    Worker -->|8. Send email| MailProvider["SMTP / Resend API"]
     Worker -->|9. Update status 'sent'/'failed'| DB
 ```
 
