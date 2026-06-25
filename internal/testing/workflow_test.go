@@ -53,8 +53,8 @@ func TestMain(m *testing.M) {
 	projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(filename)))
 
 	// ---- Configuration (env vars fall back to docker-compose defaults) ------
-	os.Setenv("DATABASE_URL", defEnv("DATABASE_URL", "postgres://vessel:vessel@localhost:5432/vessel?sslmode=disable"))
-	os.Setenv("REDIS_ADDR", defEnv("REDIS_ADDR", "localhost:6379"))
+	os.Setenv("DATABASE_URL", defEnv("DATABASE_URL", "postgres://vessel:vessel@127.0.0.1:5432/vessel?sslmode=disable"))
+	os.Setenv("REDIS_ADDR", defEnv("REDIS_ADDR", "127.0.0.1:6379"))
 	os.Setenv("API_PORT", defEnv("API_PORT", ":3001"))
 	os.Setenv("MASTER_ENCRYPTION_KEY", defEnv("MASTER_ENCRYPTION_KEY", "12345678901234567890123456789012"))
 
@@ -211,6 +211,13 @@ func seedTestData() {
 func truncateTables() {
 	_, _ = testDB.Exec("DELETE FROM email_attachments")
 	_, _ = testDB.Exec("DELETE FROM email_logs")
+
+	// Clear Asynq queues to prevent task leak or pollution between tests
+	inspector := asynq.NewInspector(testRedisOpt)
+	if inspector != nil {
+		_ = inspector.DeleteQueue("default", true)
+		inspector.Close()
+	}
 }
 
 // drainAsync waits for the asynq worker to process the given log ID
@@ -512,8 +519,19 @@ func TestAttachmentAndAutoPruning(t *testing.T) {
 	drainAsync(t, logID, "sent")
 
 	// ---- 4. Assert the file was pruned from disk ----------------------------
-	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
-		t.Fatal("attachment file should have been pruned after delivery")
+	// Note: The pruning happens in a deferred block in the worker, which may run
+	// slightly after the DB status is updated to 'sent'. We poll to avoid race conditions.
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(localPath); os.IsNotExist(err) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("attachment file should have been pruned after delivery")
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 
 	// ---- 5. Assert the mock received the attachment data --------------------

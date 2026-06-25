@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 env:
-  DATABASE_URL: "postgres://vessel:vessel@localhost:5432/vessel?sslmode=disable"
-  REDIS_ADDR: "localhost:6379"
+  DATABASE_URL: "postgres://vessel:vessel@127.0.0.1:5432/vessel?sslmode=disable"
+  REDIS_ADDR: "127.0.0.1:6379"
   API_PORT: ":3000"
   MASTER_ENCRYPTION_KEY: "12345678901234567890123456789012"
 
