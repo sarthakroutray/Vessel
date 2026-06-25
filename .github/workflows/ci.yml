@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: "postgres://vessel:vessel@localhost:5432/vessel?sslmode=disable"
+  REDIS_ADDR: "localhost:6379"
+  API_PORT: ":3000"
+  MASTER_ENCRYPTION_KEY: "12345678901234567890123456789012"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: vessel
+          POSTGRES_PASSWORD: vessel
+          POSTGRES_DB: vessel
+          PGUSER: vessel
+          PGDATABASE: vessel
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          check-latest: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run database migrations
+        run: |
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.1 \
+            -dir db/migrations postgres "$DATABASE_URL" up
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 -race -v ./...
