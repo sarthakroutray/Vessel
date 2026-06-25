@@ -120,6 +120,19 @@ func defEnv(key, fallback string) string {
 // runMigrations reads the sole migration SQL file and executes every
 // statement in the -- +goose Up section against the test database.
 func runMigrations() error {
+	// Drop existing tables to ensure a clean slate and avoid "relation already exists" errors in CI
+	dropStmts := []string{
+		"DROP TABLE IF EXISTS email_attachments CASCADE",
+		"DROP TABLE IF EXISTS email_logs CASCADE",
+		"DROP TABLE IF EXISTS delivery_routes CASCADE",
+		"DROP TABLE IF EXISTS users CASCADE",
+	}
+	for _, stmt := range dropStmts {
+		if _, err := testDB.Exec(stmt); err != nil {
+			return fmt.Errorf("drop table: %w", err)
+		}
+	}
+
 	path := filepath.Join(projectRoot, "db", "migrations", "00001_init_schema.sql")
 	raw, err := os.ReadFile(path)
 	if err != nil {
